@@ -1,327 +1,218 @@
+"""
+Comparador de precios simple y funcional.
+
+El usuario escribe un producto y la app consulta en tiempo real la API pública
+de DummyJSON (https://dummyjson.com/products/search) para traer productos
+reales con precios variados, calcular el más barato, el más caro, descuentos,
+y mostrarlos ordenados para facilitar la comparación.
+
+DummyJSON es una API pública gratuita, sin API key, con más de 200 productos
+reales en categorías como smartphones, laptops, fragancias, ropa, muebles,
+electrodomésticos, cuidado personal, etc.
+"""
+
 from __future__ import annotations
 
-try:
-    __import__("pysqlite3")
-    import sys
+from statistics import median
+from typing import Any
+from urllib.parse import quote_plus
 
-    sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
-except ModuleNotFoundError:
-    pass
-
-import logging
-import os
-from pathlib import Path
-from typing import List, Optional
-
+import pandas as pd
+import requests
 import streamlit as st
 
-from medisource.agent import AgentError, ClinicalJustificationAgent
-from medisource.config import get_settings
-from medisource.embeddings import EmbeddingError, OpenAIEmbedder
-from medisource.ingest import build_embedding_text, read_devices_from_csv
-from medisource.pricing import estimate_savings, format_eur
-from medisource.schemas import EquivalenceAnalysis, MedicalDevice, SearchHit
-from medisource.search import SearchError, find_similar, text_prefilter
-from medisource.ui import (
-    apply_theme,
-    build_alternatives_dataframe,
-    kpi_row,
-    render_alternatives_table,
-    render_device_card,
-    render_empty_state,
-    render_equivalence_report,
-    render_hero,
-    render_how_it_works,
-    render_onboarding_no_data,
-    render_savings_banner,
-)
-from medisource.vector_store import ChromaStore, VectorStoreError, stable_id
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("medisource.app")
-
-DEMO_CATALOG_PATH = Path(__file__).parent / "data" / "demo_catalog.csv"
-
+API_URL = "https://dummyjson.com/products/search"
 
 st.set_page_config(
-    page_title="MediSource AI · Clinical Spend Intelligence",
-    page_icon="⚕️",
+    page_title="Comparador de Precios",
+    page_icon="🔍",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
-apply_theme()
 
 
 # ---------------------------------------------------------------------------
-# Recursos cacheados (store, embedder y agente se reutilizan entre reruns).
+# Búsqueda
 # ---------------------------------------------------------------------------
-
-@st.cache_resource(show_spinner=False)
-def _get_store(db_path: str, collection: str) -> ChromaStore:
-    return ChromaStore(path=db_path, collection=collection)
-
-
-@st.cache_resource(show_spinner=False)
-def _get_embedder(api_key: str, model: str) -> OpenAIEmbedder:
-    return OpenAIEmbedder(api_key=api_key, model=model)
-
-
-@st.cache_resource(show_spinner=False)
-def _get_agent(api_key: str, model: str) -> ClinicalJustificationAgent:
-    return ClinicalJustificationAgent(api_key=api_key, model=model)
-
 
 @st.cache_data(ttl=300, show_spinner=False)
-def _search_reference(query: str, db_path: str, collection: str) -> List[tuple]:
-    store = _get_store(db_path, collection)
-    results = text_prefilter(store, query, limit=25)
-    return [(rid, d.model_dump()) for rid, d in results]
+def search_products(query: str, limit: int = 50) -> list[dict[str, Any]]:
+    """Consulta la API pública y normaliza la respuesta."""
+    resp = requests.get(API_URL, params={"q": query, "limit": limit}, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    results = data.get("products", []) or []
+
+    normalized: list[dict[str, Any]] = []
+    for p in results:
+        price = p.get("price")
+        if price is None:
+            continue
+        discount_pct = float(p.get("discountPercentage") or 0)
+        price = float(price)
+        original_price = round(price / (1 - discount_pct / 100), 2) if discount_pct else price
+        normalized.append({
+            "id": p.get("id"),
+            "title": p.get("title") or "(sin título)",
+            "description": p.get("description") or "",
+            "price": price,
+            "original_price": original_price,
+            "discount_pct": discount_pct,
+            "rating": float(p.get("rating") or 0),
+            "stock": int(p.get("stock") or 0),
+            "brand": p.get("brand") or "—",
+            "category": p.get("category") or "—",
+            "thumbnail": p.get("thumbnail") or "",
+            "availability_status": p.get("availabilityStatus") or "",
+        })
+    return normalized
+
+
+def format_price(amount: float) -> str:
+    return f"${amount:,.2f}"
 
 
 # ---------------------------------------------------------------------------
-# Sidebar simplificada para el usuario final.
-# Todo lo técnico (API key, ingesta, ajustes avanzados) queda tras un expander.
+# UI
 # ---------------------------------------------------------------------------
 
-def render_sidebar(settings, db_count: int) -> dict:
+def render_header() -> None:
+    st.markdown(
+        """
+        <div style="text-align:center; padding: 6px 0 18px 0;">
+            <h1 style="margin-bottom:4px;">🔍 Comparador de Precios</h1>
+            <p style="color:#6b7280; margin-top:0;">
+                Escribe el producto que buscas y compara precios al instante.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_sidebar() -> dict[str, Any]:
     with st.sidebar:
-        st.markdown("### 🏥 Tu hospital")
-        hospital = st.text_input(
-            "Nombre del centro",
-            value=st.session_state.get("hospital", "Hospital Universitario"),
-            label_visibility="collapsed",
-            placeholder="Nombre del hospital",
+        st.markdown("### 🔎 Filtros")
+        category_filter = st.text_input(
+            "Categoría (opcional)",
+            value="",
+            placeholder="Ej: smartphones",
+            help="Filtra los resultados por categoría (smartphones, laptops, fragrances…).",
         )
-        st.session_state["hospital"] = hospital
-
-        annual_volume = st.number_input(
-            "Unidades que usas al año (para calcular ahorro)",
-            min_value=1,
-            max_value=1_000_000,
-            value=int(st.session_state.get("annual_volume", 1000)),
-            step=50,
-            help="Consumo anual estimado del producto actual. Se usa para calcular el ahorro.",
-        )
-        st.session_state["annual_volume"] = int(annual_volume)
-
+        min_rating = st.slider("Puntuación mínima", 0.0, 5.0, 0.0, step=0.5)
+        only_with_stock = st.checkbox("Solo con stock disponible", value=True)
+        only_discount = st.checkbox("Solo productos con descuento", value=False)
         st.markdown("---")
-
-        # Estado de la base de datos, visible pero compacto
-        if db_count > 0:
-            st.success(f"✓ {db_count:,} productos disponibles")
-        else:
-            st.warning("Aún no hay catálogo cargado")
-
-        # Estado de la API key (sin exponerla)
-        has_secret_key = bool(settings.openai_api_key)
-        manual_key = st.session_state.get("manual_api_key", "")
-        effective_key = manual_key or settings.openai_api_key or ""
-
-        if has_secret_key:
-            st.caption("✓ Conexión con IA configurada")
-        elif manual_key:
-            st.caption("✓ Conexión con IA configurada (sesión)")
-        else:
-            st.error("⚠ Falta la conexión con IA. Abre Administración.")
-
-        # --- Panel de administración (colapsado por defecto) -----------------
-        with st.expander("🔧 Administración", expanded=(db_count == 0 or not effective_key)):
-            st.caption(
-                "Panel para el equipo técnico. Configura la conexión con IA y carga "
-                "el catálogo de productos la primera vez."
-            )
-
-            if not has_secret_key:
-                st.markdown("**Conexión con OpenAI**")
-                new_key = st.text_input(
-                    "API Key",
-                    value=manual_key,
-                    type="password",
-                    placeholder="sk-...",
-                    help="Pégala solo si tu administrador no la ha configurado en secrets.",
-                    label_visibility="collapsed",
-                )
-                if new_key != manual_key:
-                    st.session_state["manual_api_key"] = new_key
-                    os.environ["OPENAI_API_KEY"] = new_key
-                    effective_key = new_key
-                st.caption(
-                    "Mejor práctica: el administrador la configura en `secrets.toml` y "
-                    "este campo desaparece."
-                )
-                st.markdown("---")
-
-            st.markdown("**Cargar catálogo**")
-
-            if DEMO_CATALOG_PATH.exists() and st.button(
-                "🚀 Cargar catálogo demo (43 productos)",
-                use_container_width=True,
-                type="primary",
-                key="sidebar_demo_btn",
-            ):
-                _run_ingest_ui(
-                    csv_path=str(DEMO_CATALOG_PATH),
-                    uploaded=None,
-                    max_rows=None,
-                    settings=settings,
-                    api_key=effective_key,
-                )
-
-            st.caption("— o sube tu propio CSV —")
-            uploaded = st.file_uploader(
-                "Sube el CSV de productos",
-                type=["csv"],
-                label_visibility="collapsed",
-            )
-            csv_path_input = st.text_input(
-                "…o indica una ruta local",
-                value="gudid_filtrado.csv",
-                help="Ruta al CSV GUDID si no lo subes directamente.",
-            )
-            max_rows = st.number_input(
-                "Limitar filas (0 = todas, útil para pruebas)",
-                min_value=0, max_value=200_000, value=0, step=100,
-            )
-            if st.button("📥 Cargar mi catálogo", use_container_width=True):
-                _run_ingest_ui(
-                    csv_path=csv_path_input,
-                    uploaded=uploaded,
-                    max_rows=int(max_rows) or None,
-                    settings=settings,
-                    api_key=effective_key,
-                )
-
-            st.markdown("---")
-            st.markdown("**Ajustes avanzados**")
-            top_k = st.slider("Nº de alternativas a mostrar", 3, 10,
-                              int(st.session_state.get("top_k", 5)))
-            use_gmdn_filter = st.checkbox(
-                "Restringir a misma categoría clínica (GMDN)",
-                value=st.session_state.get("use_gmdn_filter", True),
-                help="Recomendado. Descarta alternativas de otras categorías médicas.",
-            )
-            similarity_floor = st.slider(
-                "Similitud mínima aceptada (%)",
-                0, 95,
-                int(st.session_state.get("similarity_floor_pct", 50)),
-                step=5,
-            )
-            chat_model = st.selectbox(
-                "Modelo del auditor IA",
-                ["gpt-4o", "gpt-4o-mini"],
-                index=0 if st.session_state.get("chat_model", settings.chat_model) == "gpt-4o" else 1,
-                help="GPT-4o ofrece análisis clínico más riguroso; mini reduce coste.",
-            )
-            st.session_state["top_k"] = int(top_k)
-            st.session_state["use_gmdn_filter"] = bool(use_gmdn_filter)
-            st.session_state["similarity_floor_pct"] = int(similarity_floor)
-            st.session_state["chat_model"] = chat_model
-
+        st.markdown("### ↕️ Orden")
+        sort = st.selectbox(
+            "Ordenar por",
+            [
+                "Precio: menor a mayor",
+                "Precio: mayor a menor",
+                "Mayor descuento",
+                "Mejor puntuación",
+            ],
+            index=0,
+        )
+        st.markdown("---")
+        limit = st.slider("Máximo de resultados a traer", 10, 50, 30, step=5)
+        st.markdown("---")
+        st.caption(
+            "Datos en vivo desde la API pública de DummyJSON. "
+            "El catálogo incluye smartphones, laptops, ropa, muebles, fragancias, "
+            "electrodomésticos y más."
+        )
     return {
-        "api_key": effective_key,
-        "chat_model": st.session_state.get("chat_model", settings.chat_model),
-        "hospital": hospital,
-        "annual_volume": int(annual_volume),
-        "top_k": int(st.session_state.get("top_k", 5)),
-        "use_gmdn_filter": bool(st.session_state.get("use_gmdn_filter", True)),
-        "similarity_floor": float(st.session_state.get("similarity_floor_pct", 50)) / 100.0,
+        "category_filter": category_filter.strip().lower(),
+        "min_rating": min_rating,
+        "only_with_stock": only_with_stock,
+        "only_discount": only_discount,
+        "sort": sort,
+        "limit": limit,
     }
 
 
-def _run_ingest_ui(
-    *,
-    csv_path: str,
-    uploaded,
-    max_rows: Optional[int],
-    settings,
-    api_key: str,
-) -> None:
-    if not api_key:
-        st.error("Antes de cargar el catálogo necesitas configurar la conexión con OpenAI.")
+def render_stats(items: list[dict[str, Any]]) -> None:
+    prices = [i["price"] for i in items]
+    if not prices:
         return
+    cheapest = min(items, key=lambda x: x["price"])
+    most_expensive = max(items, key=lambda x: x["price"])
 
-    target_path: Optional[Path] = None
-    if uploaded is not None:
-        target_path = Path("gudid_uploaded.csv")
-        target_path.write_bytes(uploaded.getvalue())
-    else:
-        p = Path(csv_path).expanduser()
-        if not p.exists():
-            st.error(f"No se encuentra el archivo: {p}")
-            return
-        target_path = p
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Productos", f"{len(items)}")
+    c2.metric("Precio mínimo", format_price(cheapest["price"]))
+    c3.metric("Mediana", format_price(median(prices)))
+    c4.metric("Precio máximo", format_price(most_expensive["price"]))
 
-    try:
-        with st.spinner(f"Leyendo y validando {target_path.name}…"):
-            devices = read_devices_from_csv(target_path, max_rows=max_rows)
-    except Exception as exc:  # noqa: BLE001
-        st.error(f"Error leyendo el CSV: {exc}")
-        return
-
-    if not devices:
-        st.error("El CSV no produjo productos válidos tras la validación.")
-        return
-
-    st.info(f"{len(devices):,} productos válidos. Generando índice semántico…")
-
-    try:
-        embedder = _get_embedder(api_key, settings.embed_model)
-    except EmbeddingError as exc:
-        st.error(str(exc))
-        return
-
-    progress = st.progress(0.0, text="Procesando 0/0")
-
-    def _cb(done: int, total: int) -> None:
-        progress.progress(done / max(1, total), text=f"Procesando {done:,}/{total:,}")
-
-    try:
-        texts = [build_embedding_text(d) for d in devices]
-        vectors = embedder.embed_many(texts, progress_cb=_cb)
-    except EmbeddingError as exc:
-        st.error(f"Falló la generación del índice: {exc}")
-        return
-
-    try:
-        store = _get_store(settings.db_path, settings.collection)
-        persisted = store.upsert_devices(devices, vectors)
-    except VectorStoreError as exc:
-        st.error(f"Falló el guardado del catálogo: {exc}")
-        return
-
-    progress.empty()
-    st.success(f"✓ Catálogo cargado. {persisted:,} productos listos para analizar.")
-    st.cache_resource.clear()
-    st.cache_data.clear()
-    st.rerun()
+    spread = most_expensive["price"] - cheapest["price"]
+    if cheapest["price"] > 0:
+        pct = spread / cheapest["price"] * 100
+        st.success(
+            f"💡 Entre el más barato y el más caro hay **{format_price(spread)}** "
+            f"de diferencia ({pct:.0f}%). El más barato es **{cheapest['title']}** "
+            f"({cheapest['brand']}) a **{format_price(cheapest['price'])}**."
+        )
 
 
-# ---------------------------------------------------------------------------
-# Flujo principal: 3 pasos guiados.
-# ---------------------------------------------------------------------------
+def render_product_card(item: dict[str, Any], rank: int, cheapest_price: float) -> None:
+    is_cheapest = item["price"] == cheapest_price
+    border = "2px solid #10b981" if is_cheapest else "1px solid #e5e7eb"
+    badge_cheap = (
+        '<span style="background:#10b981;color:white;padding:3px 10px;border-radius:10px;'
+        'font-size:0.75rem;font-weight:700;">⭐ MÁS BARATO</span>'
+        if is_cheapest else ""
+    )
 
-def _ensure_session_state() -> None:
-    st.session_state.setdefault("selected_device_id", None)
-    st.session_state.setdefault("last_query", "")
-    st.session_state.setdefault("analyses", {})
-    st.session_state.setdefault("alt_cache", {})
+    discount_html = ""
+    if item["discount_pct"] >= 1:
+        discount_html = (
+            f'<span style="background:#ef4444;color:white;padding:3px 8px;border-radius:6px;'
+            f'font-size:0.8rem;font-weight:700;margin-left:8px;">'
+            f'-{item["discount_pct"]:.0f}%</span>'
+        )
 
+    original_html = ""
+    if item["discount_pct"] >= 1 and item["original_price"] > item["price"]:
+        original_html = (
+            f'<span style="text-decoration:line-through;color:#9ca3af;font-size:0.95rem;'
+            f'margin-left:10px;">{format_price(item["original_price"])}</span>'
+        )
 
-def _render_step_header(n: int, title: str, subtitle: str = "") -> None:
-    sub = f'<div class="ms-subtitle">{subtitle}</div>' if subtitle else ""
+    stars = "★" * int(round(item["rating"])) + "☆" * (5 - int(round(item["rating"])))
+    stock_color = "#10b981" if item["stock"] > 0 else "#ef4444"
+    stock_text = f"Stock: {item['stock']}" if item["stock"] > 0 else "Sin stock"
+
     st.markdown(
         f"""
-        <div style="display:flex; align-items:center; gap:12px; margin: 18px 0 8px 0;">
-            <div style="
-                width:32px; height:32px; border-radius:50%;
-                background: linear-gradient(135deg, #22d3ee, #34d399);
-                color:#0b1020; font-weight:800; display:flex;
-                align-items:center; justify-content:center;">
-                {n}
-            </div>
-            <div>
-                <div style="font-size:1.1rem; font-weight:600;">{title}</div>
-                {sub}
+        <div style="border:{border}; border-radius:12px; padding:14px; margin-bottom:10px; background:white;">
+            <div style="display:flex; gap:14px; align-items:flex-start;">
+                <img src="{item['thumbnail']}" style="width:120px;height:120px;object-fit:contain;border-radius:8px;background:#f9fafb;padding:4px;" />
+                <div style="flex:1;">
+                    <div style="display:flex;justify-content:space-between;gap:10px;align-items:center;">
+                        <div style="font-weight:600;color:#6b7280;font-size:0.85rem;">
+                            #{rank} · {item['category']} · <b>{item['brand']}</b>
+                        </div>
+                        <div>{badge_cheap}</div>
+                    </div>
+                    <div style="font-size:1.05rem;font-weight:600;margin:4px 0;color:#111827;">
+                        {item['title']}
+                    </div>
+                    <div style="color:#6b7280;font-size:0.88rem;margin-bottom:6px;">
+                        {item['description'][:140]}{'…' if len(item['description']) > 140 else ''}
+                    </div>
+                    <div style="display:flex;align-items:baseline;gap:4px;">
+                        <span style="font-size:1.6rem;font-weight:700;color:#111827;">
+                            {format_price(item['price'])}
+                        </span>
+                        {discount_html}
+                        {original_html}
+                    </div>
+                    <div style="color:#6b7280;font-size:0.85rem;margin-top:6px;">
+                        <span style="color:#f59e0b;">{stars}</span>
+                        <span style="margin-left:4px;">{item['rating']:.1f}/5</span>
+                        · <span style="color:{stock_color};font-weight:600;">{stock_text}</span>
+                    </div>
+                </div>
             </div>
         </div>
         """,
@@ -329,364 +220,152 @@ def _render_step_header(n: int, title: str, subtitle: str = "") -> None:
     )
 
 
-def _render_step1_search(settings) -> Optional[MedicalDevice]:
-    _render_step_header(
-        1,
-        "¿Qué producto compras hoy a precio premium?",
-        "Marca, fabricante o tipo de producto. Buscaremos el equivalente clínico más barato del catálogo FDA.",
-    )
+def apply_filters(items: list[dict[str, Any]], cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    result = list(items)
+    if cfg["category_filter"]:
+        result = [i for i in result if cfg["category_filter"] in i["category"].lower()]
+    if cfg["min_rating"] > 0:
+        result = [i for i in result if i["rating"] >= cfg["min_rating"]]
+    if cfg["only_with_stock"]:
+        result = [i for i in result if i["stock"] > 0]
+    if cfg["only_discount"]:
+        result = [i for i in result if i["discount_pct"] >= 1]
 
-    query = st.text_input(
-        "buscar",
-        value=st.session_state["last_query"],
-        placeholder="Ej: bisturí nº 11  ·  catéter venoso central 7 french  ·  Medtronic",
-        label_visibility="collapsed",
-    )
-    st.session_state["last_query"] = query
-
-    if not query.strip():
-        st.caption("💡 Pista: prueba con una marca (Medtronic, BD) o un término clínico.")
-        return None
-
-    try:
-        raw = _search_reference(query.strip(), settings.db_path, settings.collection)
-    except SearchError as exc:
-        st.error(str(exc))
-        return None
-
-    if not raw:
-        st.warning("No encontramos coincidencias. Prueba otros términos o revisa el catálogo cargado.")
-        return None
-
-    candidates = [(rid, MedicalDevice(**data)) for rid, data in raw]
-
-    def _label(item):
-        _, d = item
-        suffix = f" · {d.gmdnPTName}" if d.gmdnPTName else ""
-        return f"{d.brandName} — {d.companyName}{suffix}"
-
-    default_idx = 0
-    if st.session_state["selected_device_id"]:
-        for i, (rid, _d) in enumerate(candidates):
-            if rid == st.session_state["selected_device_id"]:
-                default_idx = i
-                break
-
-    selected = st.selectbox(
-        f"Selecciona uno ({len(candidates)} coincidencias)",
-        options=candidates,
-        format_func=_label,
-        index=default_idx,
-    )
-    st.session_state["selected_device_id"] = selected[0]
-    return selected[1]
+    if cfg["sort"] == "Precio: menor a mayor":
+        result.sort(key=lambda x: x["price"])
+    elif cfg["sort"] == "Precio: mayor a menor":
+        result.sort(key=lambda x: x["price"], reverse=True)
+    elif cfg["sort"] == "Mayor descuento":
+        result.sort(key=lambda x: x["discount_pct"], reverse=True)
+    elif cfg["sort"] == "Mejor puntuación":
+        result.sort(key=lambda x: x["rating"], reverse=True)
+    return result
 
 
-def _render_step2_alternatives(
-    reference: MedicalDevice,
-    settings,
-    cfg: dict,
-) -> Optional[SearchHit]:
-    _render_step_header(
-        2,
-        "Tus alternativas más baratas",
-        "Productos del catálogo FDA equivalentes al actual, ordenados por similitud clínica. "
-        "Cuanto mayor el porcentaje, más parecidos son técnicamente.",
-    )
-
-    if not cfg["api_key"]:
-        st.error("⚠ Configura la conexión con IA en el panel Administración de la izquierda.")
-        return None
-
-    cache_key = (
-        reference.deviceIdentifier,
-        cfg["top_k"],
-        cfg["use_gmdn_filter"],
-        round(cfg["similarity_floor"], 3),
-    )
-    cache_store = st.session_state["alt_cache"]
-
-    if cache_key not in cache_store:
-        try:
-            embedder = _get_embedder(cfg["api_key"], settings.embed_model)
-        except EmbeddingError as exc:
-            st.error(str(exc))
-            return None
-
-        try:
-            store = _get_store(settings.db_path, settings.collection)
-            with st.spinner("Buscando alternativas…"):
-                hits = find_similar(
-                    store,
-                    reference,
-                    embedder=embedder,
-                    top_k=cfg["top_k"],
-                    use_gmdn_filter=cfg["use_gmdn_filter"],
-                    similarity_floor=cfg["similarity_floor"],
-                )
-        except (EmbeddingError, SearchError, VectorStoreError) as exc:
-            st.error(f"No se pudieron calcular alternativas: {exc}")
-            return None
-        cache_store[cache_key] = hits
-
-    hits: List[SearchHit] = cache_store[cache_key]
-    if not hits:
-        st.info(
-            "No hemos encontrado alternativas con el mínimo de similitud actual. "
-            "Prueba a desactivar el filtro de categoría clínica o a bajar la similitud mínima "
-            "en **Ajustes avanzados**."
-        )
-        return None
-
-    # Banner de ahorro potencial: la alternativa más rentable.
-    best = max(hits, key=lambda h: h.price_delta_unit)
-    if best.price_delta_unit > 0:
-        render_savings_banner(
-            best_unit_savings=best.price_delta_unit,
-            best_savings_pct=best.price_delta_unit_pct,
-            best_brand=f"{best.device.brandName} ({best.device.companyName})",
-            annual_savings_top=best.price_delta_unit * cfg["annual_volume"],
-            annual_volume=cfg["annual_volume"],
-        )
-
-    df = build_alternatives_dataframe(hits, annual_volume=cfg["annual_volume"])
-    render_alternatives_table(df)
-
-    option_labels = {
-        i: f"#{i+1} · {h.device.brandName} — {h.device.companyName} · similitud {h.similarity*100:.0f}%"
-        for i, h in enumerate(hits)
-    }
-    st.markdown("**Elige la alternativa que quieres evaluar:**")
-    picked = st.radio(
-        "opciones",
-        options=list(option_labels.keys()),
-        format_func=lambda i: option_labels[i],
-        label_visibility="collapsed",
-    )
-    return hits[picked]
-
-
-def _render_step3_analysis(
-    reference: MedicalDevice,
-    candidate: SearchHit,
-    cfg: dict,
-) -> None:
-    _render_step_header(
-        3,
-        "Verificación clínica e informe firmable",
-        "Pedimos al auditor IA que confirme que la sustitución es segura y emitimos el "
-        "informe que tu Jefe de Servicio Médico necesita para aprobar el cambio.",
-    )
-
-    savings = estimate_savings(
-        price_a=reference.estimated_price,
-        price_b=candidate.device.estimated_price,
-        annual_volume=cfg["annual_volume"],
-    )
-    kpi_row(savings)
-
-    analyses = st.session_state["analyses"]
-    analysis_key = f"{reference.deviceIdentifier}->{candidate.device.deviceIdentifier}"
-
-    col_btn, col_info = st.columns([1, 2.2])
-    with col_btn:
-        run = st.button(
-            "🧠 Verificar con auditor IA",
-            type="primary",
-            use_container_width=True,
-        )
-    with col_info:
-        st.caption(
-            f"Si sustituyes **{reference.brandName}** por **{candidate.device.brandName}** "
-            f"en tu inventario anual, tu hospital ahorraría "
-            f"**{format_eur(savings.annual_savings)}** ({savings.annual_savings_pct:+.1f}%)."
-        )
-
-    if run:
-        try:
-            agent = _get_agent(cfg["api_key"], cfg["chat_model"])
-            with st.spinner(f"Consultando auditor IA ({cfg['chat_model']})…"):
-                analyses[analysis_key] = agent.analyze_equivalence(reference, candidate.device)
-        except AgentError as exc:
-            st.error(str(exc))
-
-    analysis: Optional[EquivalenceAnalysis] = analyses.get(analysis_key)
-    if analysis:
-        render_equivalence_report(analysis, reference, candidate.device)
-        _render_report_download(analysis, reference, candidate.device, savings, cfg)
-    else:
-        st.caption(
-            "Pulsa **Analizar equivalencia clínica** para obtener el informe detallado "
-            "que tu Jefe de Servicio Médico necesita para aprobar la sustitución."
-        )
-
-
-def _render_report_download(
-    analysis: EquivalenceAnalysis,
-    device_a: MedicalDevice,
-    device_b: MedicalDevice,
-    savings,
-    cfg: dict,
-) -> None:
-    md = [
-        "# Informe de Equivalencia Clínica",
-        f"**Centro:** {cfg['hospital']}",
-        "",
-        "## Sustitución propuesta",
-        f"- Producto actual: **{device_a.brandName}** ({device_a.companyName}) — UDI-DI {device_a.deviceIdentifier}",
-        f"- Alternativa: **{device_b.brandName}** ({device_b.companyName}) — UDI-DI {device_b.deviceIdentifier}",
-        "",
-        "## Ahorro estimado",
-        f"- Precio unidad actual: {format_eur(savings.unit_price_a)}",
-        f"- Precio alternativa: {format_eur(savings.unit_price_b)}",
-        f"- Ahorro por unidad: {format_eur(savings.unit_savings)} ({savings.unit_savings_pct:+.1f}%)",
-        f"- Volumen anual: {savings.annual_volume:,} uds",
-        f"- **Ahorro anual: {format_eur(savings.annual_savings)} ({savings.annual_savings_pct:+.1f}%)**",
-        "",
-        "## Veredicto",
-        f"- Compatibilidad: **{analysis.compatibility_score}/100**",
-        f"- Veredicto: **{analysis.verdict_es}**",
-        f"- Resumen: {analysis.executive_summary}",
-        "",
-        "## Similitudes críticas",
-        *(f"- {s}" for s in analysis.similarities),
-        "",
-        "## Diferencias clínicas",
-        *(f"- {s}" for s in analysis.differences),
-        "",
-    ]
-    if analysis.missing_data:
-        md += ["## Datos a verificar", *(f"- {s}" for s in analysis.missing_data), ""]
-    if analysis.clinical_recommendation:
-        md += ["## Recomendación clínica", analysis.clinical_recommendation, ""]
-    md += [
-        "---",
-        "Firma del Jefe de Servicio Médico: ______________________________",
-    ]
-
-    payload = "\n".join(md).encode("utf-8")
-    st.download_button(
-        "⬇️ Descargar informe para aprobación clínica",
-        data=payload,
-        file_name=f"equivalencia_{device_a.deviceIdentifier}_{device_b.deviceIdentifier}.md",
-        mime="text/markdown",
-    )
-
-
-# ---------------------------------------------------------------------------
-# Acciones rápidas para el primer uso (catálogo vacío).
-# ---------------------------------------------------------------------------
-
-def _render_quick_actions(settings, cfg: dict) -> None:
-    """Botonera directamente accionable cuando no hay catálogo indexado."""
-    demo_exists = DEMO_CATALOG_PATH.exists()
-    has_key = bool(cfg["api_key"])
-
-    st.markdown("### Empieza en 1 clic")
-    col1, col2 = st.columns(2)
-
-    with col1:
+def render_intro() -> None:
+    st.markdown("---")
+    c1, c2, c3 = st.columns(3)
+    with c1:
         st.markdown(
             """
-            <div class="ms-card" style="min-height:180px;">
-                <h3 style="margin-top:0;">🚀 Probar con catálogo demo</h3>
-                <p class="ms-subtitle">
-                    Carga un catálogo de ejemplo con 43 productos reales (bisturís, catéteres,
-                    jeringas, sondas, mascarillas…) y empieza a buscar al instante.
-                </p>
-            </div>
-            """,
-            unsafe_allow_html=True,
+            ### 1. Escribe
+            Pon el producto que quieres comparar.
+            Ejemplos: `iphone`, `laptop`, `perfume`, `sunglasses`, `watch`.
+            """
         )
-        disabled = not (demo_exists and has_key)
-        if st.button(
-            "Cargar catálogo demo",
-            type="primary",
-            use_container_width=True,
-            disabled=disabled,
-            key="btn_demo",
-        ):
-            _run_ingest_ui(
-                csv_path=str(DEMO_CATALOG_PATH),
-                uploaded=None,
-                max_rows=None,
-                settings=settings,
-                api_key=cfg["api_key"],
-            )
-        if not demo_exists:
-            st.caption("⚠ No se encuentra `data/demo_catalog.csv` en el despliegue.")
-        elif not has_key:
-            st.caption("⚠ Necesitas configurar la conexión con IA (panel Administración).")
-        else:
-            st.caption("Tiempo estimado: ~20 segundos · coste OpenAI: menos de 0,01 €.")
-
-    with col2:
+    with c2:
         st.markdown(
             """
-            <div class="ms-card" style="min-height:180px;">
-                <h3 style="margin-top:0;">📁 Subir mi propio catálogo</h3>
-                <p class="ms-subtitle">
-                    Ya tienes un CSV con tus productos (formato GUDID o traducido al español).
-                    Subirlo desde el panel <b>Administración</b> en la barra lateral.
-                </p>
-            </div>
-            """,
-            unsafe_allow_html=True,
+            ### 2. Compara
+            La app trae productos similares y los ordena
+            de **más barato a más caro**.
+            """
         )
-        st.caption("👉 Abre **🔧 Administración** en la barra lateral → **Cargar catálogo**.")
+    with c3:
+        st.markdown(
+            """
+            ### 3. Ahorra
+            Destacamos en verde el **precio más bajo** y
+            calculamos cuánto ahorras frente al más caro.
+            """
+        )
+    st.markdown("---")
+    st.markdown("#### Pruebas rápidas")
+    quick = ["phone", "laptop", "watch", "perfume", "sunglasses", "shoes"]
+    cols = st.columns(len(quick))
+    for col, term in zip(cols, quick):
+        with col:
+            if st.button(term.capitalize(), use_container_width=True, key=f"quick_{term}"):
+                st.session_state["last_query"] = term
+                st.session_state["trigger_search"] = True
+                st.rerun()
 
 
 # ---------------------------------------------------------------------------
-# main()
+# main
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    _ensure_session_state()
-    settings = get_settings(refresh=True)
+    render_header()
+    cfg = render_sidebar()
 
-    try:
-        store = _get_store(settings.db_path, settings.collection)
-        db_count = store.count()
-    except VectorStoreError as exc:
-        st.error(f"Error abriendo la base de datos: {exc}")
-        db_count = 0
+    query = st.text_input(
+        "¿Qué producto quieres comparar?",
+        value=st.session_state.get("last_query", ""),
+        placeholder="Ej: iphone · laptop · perfume · running shoes · sunglasses",
+        label_visibility="collapsed",
+        key="query_input",
+    )
+    st.session_state["last_query"] = query
 
-    cfg = render_sidebar(settings, db_count)
+    col_btn, col_info = st.columns([1, 5])
+    with col_btn:
+        do_search = st.button("🔎 Buscar", type="primary", use_container_width=True)
+    with col_info:
+        st.caption(
+            "🌐 Datos en vivo · sin registros ni API keys · "
+            "más de 200 productos en múltiples categorías."
+        )
 
-    render_hero(db_count=db_count, has_api_key=bool(cfg["api_key"]))
+    trigger = do_search or st.session_state.pop("trigger_search", False)
 
-    # Caso 1: catálogo vacío → onboarding + acción directa de carga.
-    if db_count == 0:
-        render_how_it_works()
-        render_onboarding_no_data()
-        _render_quick_actions(settings, cfg)
+    if not query.strip():
+        render_intro()
         return
 
-    # Caso 2: catálogo cargado pero aún sin API key.
-    if not cfg["api_key"]:
-        render_how_it_works()
-        render_empty_state(
-            "Falta configurar la conexión con IA",
-            "Abre el panel Administración en la barra lateral y añade tu API key.",
+    if not trigger and query == st.session_state.get("searched_query"):
+        items = st.session_state.get("last_items")
+        if items is None:
+            render_intro()
+            return
+    else:
+        try:
+            with st.spinner(f"Buscando «{query}»…"):
+                items = search_products(query.strip(), limit=cfg["limit"])
+        except requests.RequestException as exc:
+            st.error(f"No se pudo conectar con el servicio de búsqueda: {exc}")
+            return
+        st.session_state["searched_query"] = query
+        st.session_state["last_items"] = items
+
+    if not items:
+        st.warning(
+            f"No encontramos resultados para «{query}». "
+            "Prueba con otro término (en inglés funciona mejor: phone, laptop, watch, shoes…)."
         )
         return
 
-    # Caso 3: flujo normal en 3 pasos.
-    reference = _render_step1_search(settings)
-    if not reference:
+    filtered = apply_filters(items, cfg)
+    if not filtered:
+        st.warning(
+            "Los filtros activos dejan la lista vacía. Ajusta los filtros en la barra lateral."
+        )
         return
 
     st.markdown("---")
-    col_info, _ = st.columns([1, 0.0001])
-    with col_info:
-        render_device_card(reference, title="Producto actual seleccionado")
+    render_stats(filtered)
+    st.markdown(f"### 📋 Resultados ({len(filtered)})")
 
-    candidate = _render_step2_alternatives(reference, settings, cfg)
-    if not candidate:
-        return
+    cheapest_price = min(i["price"] for i in filtered)
+    for idx, item in enumerate(filtered, start=1):
+        render_product_card(item, idx, cheapest_price)
 
-    st.markdown("---")
-    _render_step3_analysis(reference, candidate, cfg)
+    with st.expander("📊 Ver como tabla / descargar CSV"):
+        df = pd.DataFrame(filtered)[
+            ["title", "brand", "category", "price", "original_price",
+             "discount_pct", "rating", "stock"]
+        ]
+        df.columns = [
+            "Producto", "Marca", "Categoría", "Precio",
+            "Precio original", "Descuento %", "Puntuación", "Stock",
+        ]
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.download_button(
+            "⬇️ Descargar CSV",
+            data=df.to_csv(index=False).encode("utf-8"),
+            file_name=f"comparador_{quote_plus(query)}.csv",
+            mime="text/csv",
+        )
 
 
 if __name__ == "__main__":
