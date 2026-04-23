@@ -31,6 +31,8 @@ from medisource.ui import (
     render_empty_state,
     render_equivalence_report,
     render_hero,
+    render_how_it_works,
+    render_onboarding_no_data,
 )
 from medisource.vector_store import ChromaStore, VectorStoreError, stable_id
 
@@ -48,7 +50,7 @@ apply_theme()
 
 
 # ---------------------------------------------------------------------------
-# Recursos cacheados (store y embedder se reutilizan entre reruns).
+# Recursos cacheados (store, embedder y agente se reutilizan entre reruns).
 # ---------------------------------------------------------------------------
 
 @st.cache_resource(show_spinner=False)
@@ -74,90 +76,136 @@ def _search_reference(query: str, db_path: str, collection: str) -> List[tuple]:
 
 
 # ---------------------------------------------------------------------------
-# Sidebar: configuración y operaciones de mantenimiento (ingesta).
+# Sidebar simplificada para el usuario final.
+# Todo lo técnico (API key, ingesta, ajustes avanzados) queda tras un expander.
 # ---------------------------------------------------------------------------
 
-def render_sidebar(settings) -> dict:
+def render_sidebar(settings, db_count: int) -> dict:
     with st.sidebar:
-        st.markdown("### ⚙️ Configuración")
-
-        api_key_env = settings.openai_api_key or ""
-        api_key = st.text_input(
-            "OpenAI API Key",
-            value=api_key_env,
-            type="password",
-            help="Si la configuras como OPENAI_API_KEY (o en .streamlit/secrets.toml) se precarga.",
-            placeholder="sk-...",
+        st.markdown("### 🏥 Tu hospital")
+        hospital = st.text_input(
+            "Nombre del centro",
+            value=st.session_state.get("hospital", "Hospital Universitario"),
+            label_visibility="collapsed",
+            placeholder="Nombre del hospital",
         )
-        if api_key and api_key != api_key_env:
-            os.environ["OPENAI_API_KEY"] = api_key
+        st.session_state["hospital"] = hospital
 
-        chat_model = st.selectbox(
-            "Modelo de razonamiento",
-            ["gpt-4o", "gpt-4o-mini"],
-            index=0 if settings.chat_model == "gpt-4o" else 1,
-            help="GPT-4o da mejor calidad clínica; mini reduce coste.",
-        )
-
-        st.markdown("---")
-        st.markdown("### 🏥 Hospital")
-        hospital = st.text_input("Nombre del centro", value="Hospital Universitario")
         annual_volume = st.number_input(
-            "Volumen anual (uds)", min_value=1, max_value=1_000_000, value=1000, step=50,
-            help="Consumo anual del producto actual — usado para calcular ahorros.",
+            "Unidades que usas al año (para calcular ahorro)",
+            min_value=1,
+            max_value=1_000_000,
+            value=int(st.session_state.get("annual_volume", 1000)),
+            step=50,
+            help="Consumo anual estimado del producto actual. Se usa para calcular el ahorro.",
         )
+        st.session_state["annual_volume"] = int(annual_volume)
 
         st.markdown("---")
-        st.markdown("### 🔎 Búsqueda")
-        top_k = st.slider("Nº de alternativas", min_value=3, max_value=10, value=5)
-        use_gmdn_filter = st.checkbox(
-            "Filtrar por código GMDN (Capa 1)",
-            value=True,
-            help="Restringe candidatos a la misma categoría clínica GMDN.",
-        )
-        similarity_floor = st.slider(
-            "Similitud mínima (%)", min_value=0, max_value=95, value=50, step=5,
-        ) / 100.0
 
-        st.markdown("---")
-        st.markdown("### 🗄️ Base vectorial")
-        try:
-            store = _get_store(settings.db_path, settings.collection)
-            count = store.count()
-        except VectorStoreError as exc:
-            st.error(f"No se pudo abrir ChromaDB: {exc}")
-            count = 0
-        st.metric("Dispositivos indexados", f"{count:,}")
+        # Estado de la base de datos, visible pero compacto
+        if db_count > 0:
+            st.success(f"✓ {db_count:,} productos disponibles")
+        else:
+            st.warning("Aún no hay catálogo cargado")
 
-        with st.expander("📥 Ingestar CSV GUDID", expanded=(count == 0)):
+        # Estado de la API key (sin exponerla)
+        has_secret_key = bool(settings.openai_api_key)
+        manual_key = st.session_state.get("manual_api_key", "")
+        effective_key = manual_key or settings.openai_api_key or ""
+
+        if has_secret_key:
+            st.caption("✓ Conexión con IA configurada")
+        elif manual_key:
+            st.caption("✓ Conexión con IA configurada (sesión)")
+        else:
+            st.error("⚠ Falta la conexión con IA. Abre Administración.")
+
+        # --- Panel de administración (colapsado por defecto) -----------------
+        with st.expander("🔧 Administración", expanded=(db_count == 0 or not effective_key)):
             st.caption(
-                "Carga un CSV de GUDID (columnas en inglés o el formato traducido "
-                "de `gudid_filter.py`). Se generarán embeddings y se guardarán en ChromaDB."
+                "Panel para el equipo técnico. Configura la conexión con IA y carga "
+                "el catálogo de productos la primera vez."
             )
-            default_path = "gudid_filtrado.csv"
-            csv_path_input = st.text_input("Ruta del CSV", value=default_path)
-            max_rows = st.number_input(
-                "Límite de filas (0 = todas)", min_value=0, max_value=200_000, value=0, step=100,
-            )
-            uploaded = st.file_uploader("... o sube un CSV", type=["csv"], accept_multiple_files=False)
 
-            if st.button("🚀 Ejecutar ingesta", type="primary", use_container_width=True):
+            if not has_secret_key:
+                st.markdown("**Conexión con OpenAI**")
+                new_key = st.text_input(
+                    "API Key",
+                    value=manual_key,
+                    type="password",
+                    placeholder="sk-...",
+                    help="Pégala solo si tu administrador no la ha configurado en secrets.",
+                    label_visibility="collapsed",
+                )
+                if new_key != manual_key:
+                    st.session_state["manual_api_key"] = new_key
+                    os.environ["OPENAI_API_KEY"] = new_key
+                    effective_key = new_key
+                st.caption(
+                    "Mejor práctica: el administrador la configura en `secrets.toml` y "
+                    "este campo desaparece."
+                )
+                st.markdown("---")
+
+            st.markdown("**Cargar catálogo (GUDID)**")
+            uploaded = st.file_uploader(
+                "Sube el CSV de productos",
+                type=["csv"],
+                label_visibility="collapsed",
+            )
+            csv_path_input = st.text_input(
+                "…o indica una ruta",
+                value="gudid_filtrado.csv",
+                help="Ruta local al CSV GUDID si no lo subes directamente.",
+            )
+            max_rows = st.number_input(
+                "Limitar filas (0 = todas, útil para pruebas)",
+                min_value=0, max_value=200_000, value=0, step=100,
+            )
+            if st.button("📥 Cargar catálogo", use_container_width=True, type="primary"):
                 _run_ingest_ui(
                     csv_path=csv_path_input,
                     uploaded=uploaded,
                     max_rows=int(max_rows) or None,
                     settings=settings,
-                    api_key=api_key,
+                    api_key=effective_key,
                 )
 
+            st.markdown("---")
+            st.markdown("**Ajustes avanzados**")
+            top_k = st.slider("Nº de alternativas a mostrar", 3, 10,
+                              int(st.session_state.get("top_k", 5)))
+            use_gmdn_filter = st.checkbox(
+                "Restringir a misma categoría clínica (GMDN)",
+                value=st.session_state.get("use_gmdn_filter", True),
+                help="Recomendado. Descarta alternativas de otras categorías médicas.",
+            )
+            similarity_floor = st.slider(
+                "Similitud mínima aceptada (%)",
+                0, 95,
+                int(st.session_state.get("similarity_floor_pct", 50)),
+                step=5,
+            )
+            chat_model = st.selectbox(
+                "Modelo del auditor IA",
+                ["gpt-4o", "gpt-4o-mini"],
+                index=0 if st.session_state.get("chat_model", settings.chat_model) == "gpt-4o" else 1,
+                help="GPT-4o ofrece análisis clínico más riguroso; mini reduce coste.",
+            )
+            st.session_state["top_k"] = int(top_k)
+            st.session_state["use_gmdn_filter"] = bool(use_gmdn_filter)
+            st.session_state["similarity_floor_pct"] = int(similarity_floor)
+            st.session_state["chat_model"] = chat_model
+
     return {
-        "api_key": api_key,
-        "chat_model": chat_model,
+        "api_key": effective_key,
+        "chat_model": st.session_state.get("chat_model", settings.chat_model),
         "hospital": hospital,
         "annual_volume": int(annual_volume),
-        "top_k": int(top_k),
-        "use_gmdn_filter": bool(use_gmdn_filter),
-        "similarity_floor": float(similarity_floor),
+        "top_k": int(st.session_state.get("top_k", 5)),
+        "use_gmdn_filter": bool(st.session_state.get("use_gmdn_filter", True)),
+        "similarity_floor": float(st.session_state.get("similarity_floor_pct", 50)) / 100.0,
     }
 
 
@@ -170,7 +218,7 @@ def _run_ingest_ui(
     api_key: str,
 ) -> None:
     if not api_key:
-        st.error("Necesitas una API key de OpenAI para generar embeddings.")
+        st.error("Antes de cargar el catálogo necesitas configurar la conexión con OpenAI.")
         return
 
     target_path: Optional[Path] = None
@@ -180,7 +228,7 @@ def _run_ingest_ui(
     else:
         p = Path(csv_path).expanduser()
         if not p.exists():
-            st.error(f"No existe el archivo: {p}")
+            st.error(f"No se encuentra el archivo: {p}")
             return
         target_path = p
 
@@ -192,10 +240,10 @@ def _run_ingest_ui(
         return
 
     if not devices:
-        st.error("El CSV no produjo dispositivos válidos tras la validación.")
+        st.error("El CSV no produjo productos válidos tras la validación.")
         return
 
-    st.info(f"{len(devices):,} dispositivos válidos. Generando embeddings…")
+    st.info(f"{len(devices):,} productos válidos. Generando índice semántico…")
 
     try:
         embedder = _get_embedder(api_key, settings.embed_model)
@@ -203,58 +251,82 @@ def _run_ingest_ui(
         st.error(str(exc))
         return
 
-    progress = st.progress(0.0, text="Embeddings 0/0")
+    progress = st.progress(0.0, text="Procesando 0/0")
 
     def _cb(done: int, total: int) -> None:
-        progress.progress(done / max(1, total), text=f"Embeddings {done:,}/{total:,}")
+        progress.progress(done / max(1, total), text=f"Procesando {done:,}/{total:,}")
 
     try:
         texts = [build_embedding_text(d) for d in devices]
         vectors = embedder.embed_many(texts, progress_cb=_cb)
     except EmbeddingError as exc:
-        st.error(f"Falló la generación de embeddings: {exc}")
+        st.error(f"Falló la generación del índice: {exc}")
         return
 
     try:
         store = _get_store(settings.db_path, settings.collection)
         persisted = store.upsert_devices(devices, vectors)
     except VectorStoreError as exc:
-        st.error(f"Falló el guardado en ChromaDB: {exc}")
+        st.error(f"Falló el guardado del catálogo: {exc}")
         return
 
     progress.empty()
-    st.success(f"Indexación completada: {persisted:,} dispositivos persistidos en `{settings.collection}`.")
+    st.success(f"✓ Catálogo cargado. {persisted:,} productos listos para analizar.")
     st.cache_resource.clear()
     st.cache_data.clear()
     st.rerun()
 
 
 # ---------------------------------------------------------------------------
-# Vistas principales.
+# Flujo principal: 3 pasos guiados.
 # ---------------------------------------------------------------------------
 
 def _ensure_session_state() -> None:
     st.session_state.setdefault("selected_device_id", None)
     st.session_state.setdefault("last_query", "")
-    st.session_state.setdefault("alternatives", [])
-    st.session_state.setdefault("analyses", {})  # {udi_di_b: EquivalenceAnalysis}
+    st.session_state.setdefault("analyses", {})
+    st.session_state.setdefault("alt_cache", {})
 
 
-def _render_reference_picker(settings) -> Optional[MedicalDevice]:
-    st.markdown("#### 1 · Selecciona el producto actual")
+def _render_step_header(n: int, title: str, subtitle: str = "") -> None:
+    sub = f'<div class="ms-subtitle">{subtitle}</div>' if subtitle else ""
+    st.markdown(
+        f"""
+        <div style="display:flex; align-items:center; gap:12px; margin: 18px 0 8px 0;">
+            <div style="
+                width:32px; height:32px; border-radius:50%;
+                background: linear-gradient(135deg, #22d3ee, #34d399);
+                color:#0b1020; font-weight:800; display:flex;
+                align-items:center; justify-content:center;">
+                {n}
+            </div>
+            <div>
+                <div style="font-size:1.1rem; font-weight:600;">{title}</div>
+                {sub}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_step1_search(settings) -> Optional[MedicalDevice]:
+    _render_step_header(
+        1,
+        "¿Qué producto quieres optimizar?",
+        "Busca por marca, fabricante o descripción. Te mostramos coincidencias del catálogo.",
+    )
+
     query = st.text_input(
-        "Buscar por marca, fabricante, UDI-DI o descripción",
+        "buscar",
         value=st.session_state["last_query"],
-        placeholder="Ej: catéter central 7 french",
+        placeholder="Ej: catéter venoso central 7 french  ·  scalpel 11  ·  Medtronic",
         label_visibility="collapsed",
     )
     st.session_state["last_query"] = query
 
     if not query.strip():
-        render_empty_state(
-            "Empieza buscando un producto",
-            "Escribe una marca, un fabricante o parte de la descripción técnica.",
-        )
+        st.caption("💡 Pista: prueba con una marca (Medtronic, BD) o un término clínico.")
         return None
 
     try:
@@ -264,7 +336,7 @@ def _render_reference_picker(settings) -> Optional[MedicalDevice]:
         return None
 
     if not raw:
-        render_empty_state("Sin coincidencias", "Prueba con otros términos o amplía la indexación.")
+        st.warning("No encontramos coincidencias. Prueba otros términos o revisa el catálogo cargado.")
         return None
 
     candidates = [(rid, MedicalDevice(**data)) for rid, data in raw]
@@ -272,7 +344,7 @@ def _render_reference_picker(settings) -> Optional[MedicalDevice]:
     def _label(item):
         _, d = item
         suffix = f" · {d.gmdnPTName}" if d.gmdnPTName else ""
-        return f"{d.brandName} — {d.companyName}{suffix}  [{d.deviceIdentifier}]"
+        return f"{d.brandName} — {d.companyName}{suffix}"
 
     default_idx = 0
     if st.session_state["selected_device_id"]:
@@ -282,26 +354,29 @@ def _render_reference_picker(settings) -> Optional[MedicalDevice]:
                 break
 
     selected = st.selectbox(
-        "Coincidencias",
+        f"Selecciona uno ({len(candidates)} coincidencias)",
         options=candidates,
         format_func=_label,
         index=default_idx,
-        label_visibility="collapsed",
     )
     st.session_state["selected_device_id"] = selected[0]
     return selected[1]
 
 
-def _render_alternatives(
+def _render_step2_alternatives(
     reference: MedicalDevice,
     settings,
     cfg: dict,
-) -> None:
-    st.markdown("#### 2 · Alternativas clínicamente equivalentes")
+) -> Optional[SearchHit]:
+    _render_step_header(
+        2,
+        "Alternativas clínicamente equivalentes",
+        "Ordenadas por similitud. Cuanto mayor el porcentaje, más parecidas son al producto actual.",
+    )
 
     if not cfg["api_key"]:
-        st.warning("Introduce tu API key de OpenAI en la barra lateral para buscar alternativas.")
-        return
+        st.error("⚠ Configura la conexión con IA en el panel Administración de la izquierda.")
+        return None
 
     cache_key = (
         reference.deviceIdentifier,
@@ -309,18 +384,18 @@ def _render_alternatives(
         cfg["use_gmdn_filter"],
         round(cfg["similarity_floor"], 3),
     )
-    cache_store = st.session_state.setdefault("alt_cache", {})
+    cache_store = st.session_state["alt_cache"]
 
     if cache_key not in cache_store:
         try:
             embedder = _get_embedder(cfg["api_key"], settings.embed_model)
         except EmbeddingError as exc:
             st.error(str(exc))
-            return
+            return None
 
         try:
             store = _get_store(settings.db_path, settings.collection)
-            with st.spinner("Calculando similitud semántica…"):
+            with st.spinner("Buscando alternativas…"):
                 hits = find_similar(
                     store,
                     reference,
@@ -331,32 +406,45 @@ def _render_alternatives(
                 )
         except (EmbeddingError, SearchError, VectorStoreError) as exc:
             st.error(f"No se pudieron calcular alternativas: {exc}")
-            return
+            return None
         cache_store[cache_key] = hits
 
     hits: List[SearchHit] = cache_store[cache_key]
     if not hits:
-        render_empty_state(
-            "Sin alternativas bajo los filtros actuales",
-            "Prueba a desactivar el filtro GMDN o a reducir la similitud mínima.",
+        st.info(
+            "No hemos encontrado alternativas con el mínimo de similitud actual. "
+            "Prueba a desactivar el filtro de categoría clínica o a bajar la similitud mínima "
+            "en **Ajustes avanzados**."
         )
-        return
+        return None
 
     df = build_alternatives_dataframe(hits, annual_volume=cfg["annual_volume"])
     render_alternatives_table(df)
 
-    st.markdown("#### 3 · Análisis clínico asistido (Auditor IA)")
     option_labels = {
-        i: f"#{i+1} · {h.device.brandName} — {h.device.companyName} (sim {h.similarity*100:.1f}%)"
+        i: f"#{i+1} · {h.device.brandName} — {h.device.companyName} · similitud {h.similarity*100:.0f}%"
         for i, h in enumerate(hits)
     }
+    st.markdown("**Elige la alternativa que quieres evaluar:**")
     picked = st.radio(
-        "Selecciona la alternativa para evaluar",
+        "opciones",
         options=list(option_labels.keys()),
         format_func=lambda i: option_labels[i],
-        horizontal=False,
+        label_visibility="collapsed",
     )
-    candidate = hits[picked]
+    return hits[picked]
+
+
+def _render_step3_analysis(
+    reference: MedicalDevice,
+    candidate: SearchHit,
+    cfg: dict,
+) -> None:
+    _render_step_header(
+        3,
+        "Análisis clínico e impacto económico",
+        "Calculamos ahorro y pedimos a la IA un veredicto con justificación clínica.",
+    )
 
     savings = estimate_savings(
         price_a=reference.estimated_price,
@@ -368,24 +456,24 @@ def _render_alternatives(
     analyses = st.session_state["analyses"]
     analysis_key = f"{reference.deviceIdentifier}->{candidate.device.deviceIdentifier}"
 
-    col_btn, col_info = st.columns([1, 3])
+    col_btn, col_info = st.columns([1, 2.2])
     with col_btn:
         run = st.button(
-            "🧠 Analizar equivalencia",
+            "🧠 Analizar equivalencia clínica",
             type="primary",
             use_container_width=True,
         )
     with col_info:
         st.caption(
-            f"Sustitución: **{reference.brandName}** → **{candidate.device.brandName}** · "
-            f"Ahorro anual: **{format_eur(savings.annual_savings)}** "
+            f"Sustituir **{reference.brandName}** por **{candidate.device.brandName}** · "
+            f"ahorro anual estimado **{format_eur(savings.annual_savings)}** "
             f"({savings.annual_savings_pct:+.1f}%)"
         )
 
     if run:
         try:
             agent = _get_agent(cfg["api_key"], cfg["chat_model"])
-            with st.spinner(f"Consultando {cfg['chat_model']}…"):
+            with st.spinner(f"Consultando auditor IA ({cfg['chat_model']})…"):
                 analyses[analysis_key] = agent.analyze_equivalence(reference, candidate.device)
         except AgentError as exc:
             st.error(str(exc))
@@ -394,6 +482,11 @@ def _render_alternatives(
     if analysis:
         render_equivalence_report(analysis, reference, candidate.device)
         _render_report_download(analysis, reference, candidate.device, savings, cfg)
+    else:
+        st.caption(
+            "Pulsa **Analizar equivalencia clínica** para obtener el informe detallado "
+            "que tu Jefe de Servicio Médico necesita para aprobar la sustitución."
+        )
 
 
 def _render_report_download(
@@ -404,21 +497,21 @@ def _render_report_download(
     cfg: dict,
 ) -> None:
     md = [
-        f"# Informe de Equivalencia Clínica",
+        "# Informe de Equivalencia Clínica",
         f"**Centro:** {cfg['hospital']}",
         "",
-        f"## Sustitución propuesta",
+        "## Sustitución propuesta",
         f"- Producto actual: **{device_a.brandName}** ({device_a.companyName}) — UDI-DI {device_a.deviceIdentifier}",
         f"- Alternativa: **{device_b.brandName}** ({device_b.companyName}) — UDI-DI {device_b.deviceIdentifier}",
         "",
-        f"## Ahorro estimado",
+        "## Ahorro estimado",
         f"- Precio unidad actual: {format_eur(savings.unit_price_a)}",
         f"- Precio alternativa: {format_eur(savings.unit_price_b)}",
         f"- Ahorro por unidad: {format_eur(savings.unit_savings)} ({savings.unit_savings_pct:+.1f}%)",
         f"- Volumen anual: {savings.annual_volume:,} uds",
         f"- **Ahorro anual: {format_eur(savings.annual_savings)} ({savings.annual_savings_pct:+.1f}%)**",
         "",
-        f"## Veredicto",
+        "## Veredicto",
         f"- Compatibilidad: **{analysis.compatibility_score}/100**",
         f"- Veredicto: **{analysis.verdict_es}**",
         f"- Resumen: {analysis.executive_summary}",
@@ -441,7 +534,7 @@ def _render_report_download(
 
     payload = "\n".join(md).encode("utf-8")
     st.download_button(
-        "⬇️ Descargar informe (Markdown)",
+        "⬇️ Descargar informe para aprobación clínica",
         data=payload,
         file_name=f"equivalencia_{device_a.deviceIdentifier}_{device_b.deviceIdentifier}.md",
         mime="text/markdown",
@@ -449,44 +542,55 @@ def _render_report_download(
 
 
 # ---------------------------------------------------------------------------
-# Flujo principal.
+# main()
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     _ensure_session_state()
     settings = get_settings(refresh=True)
-    cfg = render_sidebar(settings)
 
     try:
         store = _get_store(settings.db_path, settings.collection)
         db_count = store.count()
     except VectorStoreError as exc:
-        st.error(f"No se pudo abrir ChromaDB: {exc}")
+        st.error(f"Error abriendo la base de datos: {exc}")
         db_count = 0
+
+    cfg = render_sidebar(settings, db_count)
 
     render_hero(db_count=db_count, has_api_key=bool(cfg["api_key"]))
 
+    # Caso 1: catálogo vacío → onboarding.
     if db_count == 0:
+        render_how_it_works()
+        render_onboarding_no_data()
+        return
+
+    # Caso 2: catálogo cargado pero aún sin API key.
+    if not cfg["api_key"]:
+        render_how_it_works()
         render_empty_state(
-            "Aún no hay dispositivos indexados",
-            "Abre la sección \"Ingestar CSV GUDID\" de la barra lateral para cargar los datos.",
+            "Falta configurar la conexión con IA",
+            "Abre el panel Administración en la barra lateral y añade tu API key.",
         )
         return
 
-    col_left, col_right = st.columns([1, 1.35], gap="large")
-    with col_left:
-        reference = _render_reference_picker(settings)
-        if reference:
-            render_device_card(reference, title="Producto actual")
+    # Caso 3: flujo normal en 3 pasos.
+    reference = _render_step1_search(settings)
+    if not reference:
+        return
 
-    with col_right:
-        if reference:
-            _render_alternatives(reference, settings, cfg)
-        else:
-            render_empty_state(
-                "Selecciona un producto para ver alternativas",
-                "Las sugerencias se calcularán al elegir una coincidencia.",
-            )
+    st.markdown("---")
+    col_info, _ = st.columns([1, 0.0001])
+    with col_info:
+        render_device_card(reference, title="Producto actual seleccionado")
+
+    candidate = _render_step2_alternatives(reference, settings, cfg)
+    if not candidate:
+        return
+
+    st.markdown("---")
+    _render_step3_analysis(reference, candidate, cfg)
 
 
 if __name__ == "__main__":

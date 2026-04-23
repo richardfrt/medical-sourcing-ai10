@@ -297,3 +297,62 @@ def render_empty_state(message: str, hint: Optional[str] = None) -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+def render_how_it_works() -> None:
+    """Panel de 'cómo funciona' visible al abrir la app por primera vez."""
+    st.markdown(
+        """
+        <div class="ms-card">
+            <h3 style="margin-top:0;">Cómo funciona MediSource AI</h3>
+            <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:16px; margin-top:12px;">
+                <div>
+                    <div style="font-size:1.6rem; font-weight:700; color: var(--ms-accent);">1</div>
+                    <div style="font-weight:600; margin: 4px 0;">Busca el producto</div>
+                    <div class="ms-subtitle">
+                        Escribe una marca, fabricante o descripción. Mostramos coincidencias
+                        del catálogo FDA GUDID.
+                    </div>
+                </div>
+                <div>
+                    <div style="font-size:1.6rem; font-weight:700; color: var(--ms-accent);">2</div>
+                    <div style="font-weight:600; margin: 4px 0;">Revisa alternativas</div>
+                    <div class="ms-subtitle">
+                        Nuestro motor IA te propone productos clínicamente similares y
+                        calcula el ahorro anual para tu hospital.
+                    </div>
+                </div>
+                <div>
+                    <div style="font-size:1.6rem; font-weight:700; color: var(--ms-accent);">3</div>
+                    <div style="font-weight:600; margin: 4px 0;">Analiza equivalencia</div>
+                    <div class="ms-subtitle">
+                        GPT-4o actúa como auditor clínico y emite un veredicto con
+                        justificación descargable para tu Jefe de Servicio.
+                    </div>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_onboarding_no_data() -> None:
+    """Pantalla de bienvenida cuando la base vectorial está vacía."""
+    st.markdown(
+        """
+        <div class="ms-card" style="text-align:center; padding:48px 24px;">
+            <div style="font-size:2.2rem; margin-bottom:8px;">👋</div>
+            <h3 style="margin:0 0 6px 0;">Bienvenido a MediSource AI</h3>
+            <p class="ms-subtitle" style="max-width:560px; margin:0 auto;">
+                Para empezar, carga tu catálogo de productos (CSV). Nosotros generamos los
+                embeddings y la base semántica. Sólo hace falta una vez.
+            </p>
+            <p class="ms-subtitle" style="margin-top:14px;">
+                👉 Abre el panel <b>Administración</b> en la barra lateral y pulsa
+                <b>«Cargar catálogo»</b>.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
