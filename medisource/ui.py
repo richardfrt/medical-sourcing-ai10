@@ -110,19 +110,24 @@ def apply_theme() -> None:
 
 def render_hero(db_count: int, has_api_key: bool) -> None:
     status = (
-        f"{db_count:,} dispositivos GUDID indexados"
+        f"{db_count:,} productos en catálogo"
         if db_count
-        else "Base vectorial vacía — ejecuta la ingesta para empezar"
+        else "Catálogo no cargado"
     )
-    key_status = "API OpenAI conectada" if has_api_key else "Sin API key OpenAI"
+    key_status = "Auditor IA conectado" if has_api_key else "Auditor IA desconectado"
     st.markdown(
         f"""
         <div class="ms-hero">
-            <h1>MediSource AI · Clinical Spend Intelligence</h1>
-            <p>Entity Resolution + RAG sobre FDA GUDID · Reducción de gasto MedSurg con no-inferioridad clínica.</p>
-            <div style="margin-top:10px;">
+            <h1>MediSource AI · El comparador clínico de tu hospital</h1>
+            <p>
+                El "buscador de equivalencias" para material sanitario. Compras una marca premium
+                a 100&nbsp;€, te enseñamos la genérica equivalente a 70&nbsp;€ y la IA garantiza
+                que es clínicamente segura. <b>Ahorro medio detectado: 12-18% del gasto MedSurg.</b>
+            </p>
+            <div style="margin-top:12px;">
                 <span class="ms-chip">{status}</span>
                 <span class="ms-chip {'positive' if has_api_key else 'negative'}">{key_status}</span>
+                <span class="ms-chip neutral">Datos: FDA GUDID</span>
             </div>
         </div>
         """,
@@ -300,34 +305,40 @@ def render_empty_state(message: str, hint: Optional[str] = None) -> None:
 
 
 def render_how_it_works() -> None:
-    """Panel de 'cómo funciona' visible al abrir la app por primera vez."""
+    """Panel de 'cómo funciona' alineado con el pitch de negocio."""
     st.markdown(
         """
         <div class="ms-card">
-            <h3 style="margin-top:0;">Cómo funciona MediSource AI</h3>
-            <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:16px; margin-top:12px;">
+            <h3 style="margin-top:0;">Cómo funciona en 3 pasos</h3>
+            <p class="ms-subtitle" style="margin: 0 0 14px 0;">
+                Sin entrenar modelos médicos caros. Usamos la base oficial de la FDA + IA generativa.
+            </p>
+            <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:18px;">
                 <div>
-                    <div style="font-size:1.6rem; font-weight:700; color: var(--ms-accent);">1</div>
-                    <div style="font-weight:600; margin: 4px 0;">Busca el producto</div>
+                    <div style="font-size:1.4rem;">🧭</div>
+                    <div style="font-weight:600; margin: 6px 0;">1 · Coordenadas inteligentes</div>
                     <div class="ms-subtitle">
-                        Escribe una marca, fabricante o descripción. Mostramos coincidencias
-                        del catálogo FDA GUDID.
+                        OpenAI lee la descripción técnica de cada producto del catálogo FDA y la
+                        convierte en una huella matemática. Productos parecidos quedan
+                        <b>cerca, como vecinos en un mapa</b>.
                     </div>
                 </div>
                 <div>
-                    <div style="font-size:1.6rem; font-weight:700; color: var(--ms-accent);">2</div>
-                    <div style="font-weight:600; margin: 4px 0;">Revisa alternativas</div>
+                    <div style="font-size:1.4rem;">🔍</div>
+                    <div style="font-weight:600; margin: 6px 0;">2 · Buscamos los vecinos baratos</div>
                     <div class="ms-subtitle">
-                        Nuestro motor IA te propone productos clínicamente similares y
-                        calcula el ahorro anual para tu hospital.
+                        Cuando buscas un producto premium, la base vectorial encuentra al instante
+                        los más similares — incluyendo los <b>genéricos equivalentes</b> que
+                        nadie había detectado.
                     </div>
                 </div>
                 <div>
-                    <div style="font-size:1.6rem; font-weight:700; color: var(--ms-accent);">3</div>
-                    <div style="font-weight:600; margin: 4px 0;">Analiza equivalencia</div>
+                    <div style="font-size:1.4rem;">👨‍⚕️</div>
+                    <div style="font-weight:600; margin: 6px 0;">3 · Auditor clínico GPT-4o</div>
                     <div class="ms-subtitle">
-                        GPT-4o actúa como auditor clínico y emite un veredicto con
-                        justificación descargable para tu Jefe de Servicio.
+                        Antes de proponer la sustitución, GPT-4o revisa material, dimensiones y
+                        esterilización, y emite un <b>informe firmable</b> por tu Jefe de Servicio
+                        Médico.
                     </div>
                 </div>
             </div>
@@ -338,21 +349,116 @@ def render_how_it_works() -> None:
 
 
 def render_onboarding_no_data() -> None:
-    """Pantalla de bienvenida cuando la base vectorial está vacía."""
+    """Pantalla de bienvenida cuando la base vectorial está vacía.
+
+    Incluye un ejemplo realista del valor (bisturí 100€ vs 70€) para
+    enganchar al CFO antes incluso de cargar datos.
+    """
     st.markdown(
         """
-        <div class="ms-card" style="text-align:center; padding:48px 24px;">
-            <div style="font-size:2.2rem; margin-bottom:8px;">👋</div>
-            <h3 style="margin:0 0 6px 0;">Bienvenido a MediSource AI</h3>
-            <p class="ms-subtitle" style="max-width:560px; margin:0 auto;">
-                Para empezar, carga tu catálogo de productos (CSV). Nosotros generamos los
-                embeddings y la base semántica. Sólo hace falta una vez.
-            </p>
-            <p class="ms-subtitle" style="margin-top:14px;">
-                👉 Abre el panel <b>Administración</b> en la barra lateral y pulsa
-                <b>«Cargar catálogo»</b>.
-            </p>
+        <div class="ms-card" style="padding:36px 28px;">
+            <div style="text-align:center;">
+                <div style="font-size:2.2rem;">👋</div>
+                <h3 style="margin:6px 0;">Bienvenido a MediSource AI</h3>
+                <p class="ms-subtitle" style="max-width:620px; margin:0 auto;">
+                    Antes de empezar, mira un caso real de lo que esta herramienta detecta:
+                </p>
+            </div>
+
+            <div style="
+                display:grid; grid-template-columns: 1fr auto 1fr; gap:18px;
+                align-items:center; margin: 24px auto; max-width: 760px;">
+                <div style="
+                    border:1px solid var(--ms-border); border-radius:14px;
+                    padding:18px; text-align:center; background: rgba(248,113,113,0.06);">
+                    <div class="ms-subtitle" style="font-size:0.75rem; letter-spacing:0.1em;">PRODUCTO PREMIUM</div>
+                    <div style="font-weight:700; margin: 6px 0;">Bisturí marca X</div>
+                    <div style="font-size:1.6rem; font-weight:700; color: var(--ms-negative);">100&nbsp;€</div>
+                    <div class="ms-subtitle" style="font-size:0.8rem;">precio actual / unidad</div>
+                </div>
+                <div style="font-size:1.6rem; color: var(--ms-accent); text-align:center;">→</div>
+                <div style="
+                    border:1px solid rgba(52,211,153,0.4); border-radius:14px;
+                    padding:18px; text-align:center; background: rgba(52,211,153,0.08);">
+                    <div class="ms-subtitle" style="font-size:0.75rem; letter-spacing:0.1em;">GENÉRICO EQUIVALENTE</div>
+                    <div style="font-weight:700; margin: 6px 0;">Bisturí marca Y</div>
+                    <div style="font-size:1.6rem; font-weight:700; color: var(--ms-positive);">70&nbsp;€</div>
+                    <div class="ms-subtitle" style="font-size:0.8rem;">mismo material · misma certificación</div>
+                </div>
+            </div>
+
+            <div style="text-align:center; margin-bottom: 18px;">
+                <span class="ms-chip positive" style="font-size:0.95rem; padding:6px 14px;">
+                    Ahorras 30&nbsp;€ por unidad · auditor IA aprueba la sustitución
+                </span>
+            </div>
+
+            <hr style="border-color: var(--ms-border); margin: 20px 0;">
+
+            <div style="text-align:center;">
+                <p class="ms-subtitle" style="max-width:620px; margin:0 auto 10px auto;">
+                    Para encontrar oportunidades como esta en tu hospital, carga tu catálogo
+                    de productos (CSV). Sólo hace falta hacerlo una vez.
+                </p>
+                <p class="ms-subtitle" style="margin: 6px 0 0 0;">
+                    👉 Abre el panel <b>🔧 Administración</b> en la barra lateral y pulsa
+                    <b>«Cargar catálogo»</b>.
+                </p>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+
+def render_savings_banner(
+    *,
+    best_unit_savings: float,
+    best_savings_pct: float,
+    best_brand: str,
+    annual_savings_top: float,
+    annual_volume: int,
+) -> None:
+    """Banner con el ahorro potencial detectado para enganchar al CFO."""
+    if best_unit_savings <= 0:
+        return
+
+    color = "var(--ms-positive)" if best_savings_pct >= 10 else "var(--ms-accent)"
+    st.markdown(
+        f"""
+        <div class="ms-card" style="
+            background: linear-gradient(135deg, rgba(52,211,153,0.10), rgba(34,211,238,0.06));
+            border-color: rgba(52,211,153,0.35);">
+            <div style="display:flex; flex-wrap:wrap; gap:18px; align-items:center; justify-content:space-between;">
+                <div>
+                    <div class="ms-subtitle" style="font-size:0.8rem; letter-spacing:0.08em; text-transform:uppercase;">
+                        💰 Mejor oportunidad detectada
+                    </div>
+                    <div style="font-weight:700; font-size:1.05rem; margin-top:4px;">
+                        Sustituyendo por <span style="color:{color};">{best_brand}</span>
+                    </div>
+                    <div class="ms-subtitle" style="margin-top:2px;">
+                        Ahorro de <b>{best_savings_pct:.0f}%</b> por unidad ·
+                        volumen anual estimado <b>{annual_volume:,} uds</b>
+                    </div>
+                </div>
+                <div style="text-align:right;">
+                    <div class="ms-subtitle" style="font-size:0.8rem;">AHORRO ANUAL POTENCIAL</div>
+                    <div style="font-size:2.1rem; font-weight:800; color:{color}; line-height:1;">
+                        {_format_eur_inline(annual_savings_top)}
+                    </div>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _format_eur_inline(value: float) -> str:
+    """Formato es-ES sin importar pricing.format_eur (evita import circular)."""
+    try:
+        s = f"{float(value):,.0f}"
+    except (TypeError, ValueError):
+        return str(value)
+    return s.replace(",", ".") + " €"

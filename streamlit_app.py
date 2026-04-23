@@ -33,6 +33,7 @@ from medisource.ui import (
     render_hero,
     render_how_it_works,
     render_onboarding_no_data,
+    render_savings_banner,
 )
 from medisource.vector_store import ChromaStore, VectorStoreError, stable_id
 
@@ -313,14 +314,14 @@ def _render_step_header(n: int, title: str, subtitle: str = "") -> None:
 def _render_step1_search(settings) -> Optional[MedicalDevice]:
     _render_step_header(
         1,
-        "¿Qué producto quieres optimizar?",
-        "Busca por marca, fabricante o descripción. Te mostramos coincidencias del catálogo.",
+        "¿Qué producto compras hoy a precio premium?",
+        "Marca, fabricante o tipo de producto. Buscaremos el equivalente clínico más barato del catálogo FDA.",
     )
 
     query = st.text_input(
         "buscar",
         value=st.session_state["last_query"],
-        placeholder="Ej: catéter venoso central 7 french  ·  scalpel 11  ·  Medtronic",
+        placeholder="Ej: bisturí nº 11  ·  catéter venoso central 7 french  ·  Medtronic",
         label_visibility="collapsed",
     )
     st.session_state["last_query"] = query
@@ -370,8 +371,9 @@ def _render_step2_alternatives(
 ) -> Optional[SearchHit]:
     _render_step_header(
         2,
-        "Alternativas clínicamente equivalentes",
-        "Ordenadas por similitud. Cuanto mayor el porcentaje, más parecidas son al producto actual.",
+        "Tus alternativas más baratas",
+        "Productos del catálogo FDA equivalentes al actual, ordenados por similitud clínica. "
+        "Cuanto mayor el porcentaje, más parecidos son técnicamente.",
     )
 
     if not cfg["api_key"]:
@@ -418,6 +420,17 @@ def _render_step2_alternatives(
         )
         return None
 
+    # Banner de ahorro potencial: la alternativa más rentable.
+    best = max(hits, key=lambda h: h.price_delta_unit)
+    if best.price_delta_unit > 0:
+        render_savings_banner(
+            best_unit_savings=best.price_delta_unit,
+            best_savings_pct=best.price_delta_unit_pct,
+            best_brand=f"{best.device.brandName} ({best.device.companyName})",
+            annual_savings_top=best.price_delta_unit * cfg["annual_volume"],
+            annual_volume=cfg["annual_volume"],
+        )
+
     df = build_alternatives_dataframe(hits, annual_volume=cfg["annual_volume"])
     render_alternatives_table(df)
 
@@ -442,8 +455,9 @@ def _render_step3_analysis(
 ) -> None:
     _render_step_header(
         3,
-        "Análisis clínico e impacto económico",
-        "Calculamos ahorro y pedimos a la IA un veredicto con justificación clínica.",
+        "Verificación clínica e informe firmable",
+        "Pedimos al auditor IA que confirme que la sustitución es segura y emitimos el "
+        "informe que tu Jefe de Servicio Médico necesita para aprobar el cambio.",
     )
 
     savings = estimate_savings(
@@ -459,15 +473,15 @@ def _render_step3_analysis(
     col_btn, col_info = st.columns([1, 2.2])
     with col_btn:
         run = st.button(
-            "🧠 Analizar equivalencia clínica",
+            "🧠 Verificar con auditor IA",
             type="primary",
             use_container_width=True,
         )
     with col_info:
         st.caption(
-            f"Sustituir **{reference.brandName}** por **{candidate.device.brandName}** · "
-            f"ahorro anual estimado **{format_eur(savings.annual_savings)}** "
-            f"({savings.annual_savings_pct:+.1f}%)"
+            f"Si sustituyes **{reference.brandName}** por **{candidate.device.brandName}** "
+            f"en tu inventario anual, tu hospital ahorraría "
+            f"**{format_eur(savings.annual_savings)}** ({savings.annual_savings_pct:+.1f}%)."
         )
 
     if run:
