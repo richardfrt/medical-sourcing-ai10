@@ -40,6 +40,8 @@ from medisource.vector_store import ChromaStore, VectorStoreError, stable_id
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("medisource.app")
 
+DEMO_CATALOG_PATH = Path(__file__).parent / "data" / "demo_catalog.csv"
+
 
 st.set_page_config(
     page_title="MediSource AI · Clinical Spend Intelligence",
@@ -149,22 +151,38 @@ def render_sidebar(settings, db_count: int) -> dict:
                 )
                 st.markdown("---")
 
-            st.markdown("**Cargar catálogo (GUDID)**")
+            st.markdown("**Cargar catálogo**")
+
+            if DEMO_CATALOG_PATH.exists() and st.button(
+                "🚀 Cargar catálogo demo (43 productos)",
+                use_container_width=True,
+                type="primary",
+                key="sidebar_demo_btn",
+            ):
+                _run_ingest_ui(
+                    csv_path=str(DEMO_CATALOG_PATH),
+                    uploaded=None,
+                    max_rows=None,
+                    settings=settings,
+                    api_key=effective_key,
+                )
+
+            st.caption("— o sube tu propio CSV —")
             uploaded = st.file_uploader(
                 "Sube el CSV de productos",
                 type=["csv"],
                 label_visibility="collapsed",
             )
             csv_path_input = st.text_input(
-                "…o indica una ruta",
+                "…o indica una ruta local",
                 value="gudid_filtrado.csv",
-                help="Ruta local al CSV GUDID si no lo subes directamente.",
+                help="Ruta al CSV GUDID si no lo subes directamente.",
             )
             max_rows = st.number_input(
                 "Limitar filas (0 = todas, útil para pruebas)",
                 min_value=0, max_value=200_000, value=0, step=100,
             )
-            if st.button("📥 Cargar catálogo", use_container_width=True, type="primary"):
+            if st.button("📥 Cargar mi catálogo", use_container_width=True):
                 _run_ingest_ui(
                     csv_path=csv_path_input,
                     uploaded=uploaded,
@@ -556,6 +574,69 @@ def _render_report_download(
 
 
 # ---------------------------------------------------------------------------
+# Acciones rápidas para el primer uso (catálogo vacío).
+# ---------------------------------------------------------------------------
+
+def _render_quick_actions(settings, cfg: dict) -> None:
+    """Botonera directamente accionable cuando no hay catálogo indexado."""
+    demo_exists = DEMO_CATALOG_PATH.exists()
+    has_key = bool(cfg["api_key"])
+
+    st.markdown("### Empieza en 1 clic")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown(
+            """
+            <div class="ms-card" style="min-height:180px;">
+                <h3 style="margin-top:0;">🚀 Probar con catálogo demo</h3>
+                <p class="ms-subtitle">
+                    Carga un catálogo de ejemplo con 43 productos reales (bisturís, catéteres,
+                    jeringas, sondas, mascarillas…) y empieza a buscar al instante.
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        disabled = not (demo_exists and has_key)
+        if st.button(
+            "Cargar catálogo demo",
+            type="primary",
+            use_container_width=True,
+            disabled=disabled,
+            key="btn_demo",
+        ):
+            _run_ingest_ui(
+                csv_path=str(DEMO_CATALOG_PATH),
+                uploaded=None,
+                max_rows=None,
+                settings=settings,
+                api_key=cfg["api_key"],
+            )
+        if not demo_exists:
+            st.caption("⚠ No se encuentra `data/demo_catalog.csv` en el despliegue.")
+        elif not has_key:
+            st.caption("⚠ Necesitas configurar la conexión con IA (panel Administración).")
+        else:
+            st.caption("Tiempo estimado: ~20 segundos · coste OpenAI: menos de 0,01 €.")
+
+    with col2:
+        st.markdown(
+            """
+            <div class="ms-card" style="min-height:180px;">
+                <h3 style="margin-top:0;">📁 Subir mi propio catálogo</h3>
+                <p class="ms-subtitle">
+                    Ya tienes un CSV con tus productos (formato GUDID o traducido al español).
+                    Subirlo desde el panel <b>Administración</b> en la barra lateral.
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.caption("👉 Abre **🔧 Administración** en la barra lateral → **Cargar catálogo**.")
+
+
+# ---------------------------------------------------------------------------
 # main()
 # ---------------------------------------------------------------------------
 
@@ -574,10 +655,11 @@ def main() -> None:
 
     render_hero(db_count=db_count, has_api_key=bool(cfg["api_key"]))
 
-    # Caso 1: catálogo vacío → onboarding.
+    # Caso 1: catálogo vacío → onboarding + acción directa de carga.
     if db_count == 0:
         render_how_it_works()
         render_onboarding_no_data()
+        _render_quick_actions(settings, cfg)
         return
 
     # Caso 2: catálogo cargado pero aún sin API key.
