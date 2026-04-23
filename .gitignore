@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# Entornos locales
+.venv/
+venv/
+env/
+
+# Datos locales
+chroma_db/
+gudid_uploaded.csv
+gudid_downloaded/
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# IDE
+.vscode/
+.idea/
